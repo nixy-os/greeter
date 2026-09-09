@@ -5,11 +5,15 @@ A minimal Rust/GTK4 login form for greetd, designed to run under a dedicated Way
 ## Develop and preview
 
 ```sh
-nix-shell --run 'cargo test --locked'
-nix-shell --run 'cargo run --locked -- --demo'
+nix develop --command cargo test --locked
+nix develop --command cargo clippy --locked --all-targets -- -D warnings
+nix develop --command cargo run --locked -- --demo
+nix run . -- --demo
+nix build
+nix flake check
 ```
 
-`shell.nix` accepts a `pkgs` argument to use a pinned nixpkgs checkout. The NixOS integration pins dependencies with its flake lock and this repository's Cargo.lock.
+The flake exposes `packages.x86_64-linux.default` (also `nixy-greeter`), a pinned development shell, and a package check that runs the Rust tests. `shell.nix` remains available for callers supplying their own `pkgs`. Cargo.lock and `cargoHash` in `package.nix` pin Rust dependencies; update the hash when dependency changes require it.
 
 Demo mode never connects to greetd or executes session/power commands. Any credentials simulate a successful login. It opens a regular window so it can be previewed without replacing your login manager. Production mode requests a fullscreen window.
 
@@ -29,6 +33,10 @@ Power controls require two clicks and invoke only the configured systemctl execu
 
 ## Integration ownership
 
-This repository owns the application and Cargo dependency lock. `/home/peter/.nix-config` owns host display modes, early KMS/Plymouth, greetd/PAM, UWSM, power policy, and deployment. Until a remote release is published, it carries a complete versioned source archive of this application so builds never depend on this mutable development directory. Update the archive only after tests and UI checks pass; do not edit its extracted contents independently.
+This repository owns the application, Nix package, and Cargo dependency lock. `/home/peter/.nix-config` consumes the public `github:nixy-os/greeter` flake at a revision pinned in its lock file. It owns host display modes, early KMS/Plymouth, greetd/PAM, UWSM, power policy, and deployment.
+
+After validating and publishing an application commit, run `make update-input INPUT=greeter` in the OS repository, then its evaluation, VM, and host build checks. Local application edits do not affect deployment until that pinned input is updated. For integration development, use `nix build --no-link .#nixy-greeter --override-input greeter path:/home/peter/Dev/nixy-os/greeter --no-write-lock-file` from the OS repository.
+
+The OS input follows its own nixpkgs. Standalone and OS builds reuse the same store result when source, package settings, system, and nixpkgs revision match. The source fileset excludes documentation and flake metadata so documentation changes alone do not rebuild the application. Different nixpkgs revisions can require a rebuild; a remote flake does not itself provide a binary cache.
 
 Hardware acceptance still requires boot/login/logout testing on each host after an explicitly authorized activation. Unit tests or a preview do not prove flicker-free physical GPU handoffs.
