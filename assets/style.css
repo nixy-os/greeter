@@ -1,0 +1,10 @@
+* { font-family: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", monospace; }
+window { background: #1a1b26; color: #a9b1d6; font-size: 16px; }
+.brand { color: #a9b1d6; font-size: 22px; line-height: 1; }
+.hostname { color: #565f89; font-size: 13px; margin-top: 14px; margin-bottom: 32px; }
+entry { color: #a9b1d6; background: transparent; border: 1px solid #565f89; border-radius: 0; padding: 6px 10px; min-height: 22px; box-shadow: none; }
+entry:focus-within { border-color: #a9b1d6; outline: none; }
+button { color: #a9b1d6; background: transparent; border: 1px solid transparent; border-radius: 0; padding: 6px 12px; box-shadow: none; }
+button:hover, button:focus { border-color: #565f89; color: #c0caf5; outline: none; }
+button:disabled { opacity: 0.45; }
+.message { color: #e0af68; font-size: 13px; }

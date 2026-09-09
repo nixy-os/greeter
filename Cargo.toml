@@ -1,0 +1,17 @@
+[package]
+name = "nixy-greeter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A minimal keyboard-first Wayland login form for greetd"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10" }
+greetd_ipc = { version = "0.10", features = ["sync-codec"] }
+zeroize = "1"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true
