@@ -128,6 +128,7 @@ struct Form {
     app: gtk::Application,
     demo: bool,
     busy: Cell<bool>,
+    pending_mask: Cell<bool>,
     connected: Cell<bool>,
     challenge: Cell<bool>,
     notice: Cell<bool>,
@@ -143,7 +144,30 @@ struct Form {
 }
 
 impl Form {
+    fn clear_password(&self) {
+        self.password.set_text("");
+        self.pending_mask.set(false);
+    }
+
+    fn take_answer(&self) -> String {
+        let answer = self.password.text().to_string();
+        self.busy(true);
+        self.clear_password();
+        if !EntryExt::is_visible(&self.password) && !answer.is_empty() {
+            // Preserve only the displayed length while waiting, never the credential.
+            self.password.set_text(&"•".repeat(answer.chars().count()));
+            self.pending_mask.set(true);
+        }
+        answer
+    }
+
     fn busy(&self, busy: bool) {
+        if busy && let Some(window) = self.password.root().and_downcast::<gtk::Window>() {
+            GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        }
+        if !busy && self.pending_mask.get() {
+            self.clear_password();
+        }
         self.busy.set(busy);
         let can_login = !busy && self.connected.get();
         self.username
@@ -158,6 +182,9 @@ impl Form {
     }
 
     fn send(&self, request: Request) {
+        if matches!(request, Request::CancelSession) {
+            self.clear_password();
+        }
         self.busy(true);
         if self.tx.send(Work::Auth(request)).is_err() {
             self.disconnected();
@@ -166,7 +193,7 @@ impl Form {
 
     fn disconnected(&self) {
         self.connected.set(false);
-        self.password.set_text("");
+        self.clear_password();
         // Drop all pending password material and do not reuse a broken IPC stream.
         self.login.borrow_mut().cancel("");
         self.message
@@ -179,7 +206,7 @@ impl Form {
     fn reset(&self, message: &str) {
         self.challenge.set(false);
         self.notice.set(false);
-        self.password.set_text("");
+        self.clear_password();
         self.password.set_visibility(false);
         self.password.set_input_purpose(gtk::InputPurpose::Password);
         self.password_label.set_text("Password:");
@@ -195,7 +222,7 @@ impl Form {
             Step::Prompt { text, secret } => {
                 self.challenge.set(true);
                 self.notice.set(false);
-                self.password.set_text("");
+                self.clear_password();
                 self.password.set_visibility(!secret);
                 self.password.set_input_purpose(if secret {
                     gtk::InputPurpose::Password
@@ -209,6 +236,7 @@ impl Form {
                 self.password.grab_focus();
             }
             Step::Notice { text } => {
+                self.clear_password();
                 self.challenge.set(true);
                 self.notice.set(true);
                 self.message.set_text(&text);
@@ -224,15 +252,14 @@ impl Form {
     }
 
     fn submit(&self) {
-        if self.busy.get() || !self.connected.get() {
+        if self.busy.get() || self.pending_mask.get() || !self.connected.get() {
             return;
         }
         self.power_confirm.set(None);
         let step = if self.notice.get() {
             self.login.borrow_mut().acknowledge()
         } else if self.challenge.get() {
-            let answer = self.password.text().to_string();
-            self.password.set_text("");
+            let answer = self.take_answer();
             self.login.borrow_mut().answer(answer)
         } else {
             let username = self.username.text().trim().to_string();
@@ -240,8 +267,7 @@ impl Form {
                 self.username.grab_focus();
                 return;
             }
-            let password = self.password.text().to_string();
-            self.password.set_text("");
+            let password = self.take_answer();
             self.message.set_text("Logging in…");
             self.login.borrow_mut().begin(username, password)
         };
@@ -366,6 +392,7 @@ fn ui(app: &gtk::Application, options: &Options) {
         app: app.clone(),
         demo: options.demo,
         busy: Cell::new(false),
+        pending_mask: Cell::new(false),
         connected: Cell::new(true),
         challenge: Cell::new(false),
         notice: Cell::new(false),
@@ -447,4 +474,146 @@ fn main() -> glib::ExitCode {
         .build();
     app.connect_activate(move |app| ui(app, &options));
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use greetd_ipc::ErrorType;
+
+    #[test]
+    #[ignore = "requires an isolated GTK display (run with xvfb-run)"]
+    fn pending_password_is_only_a_mask_and_clears_at_auth_boundaries() {
+        gtk::init().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let form = Form {
+            login: RefCell::new(Login::new(vec!["/session".into()])),
+            tx,
+            app: gtk::Application::default(),
+            demo: true,
+            busy: Cell::new(false),
+            pending_mask: Cell::new(false),
+            connected: Cell::new(true),
+            challenge: Cell::new(false),
+            notice: Cell::new(false),
+            power_confirm: Cell::new(None),
+            username: gtk::Entry::new(),
+            password: gtk::Entry::builder().visibility(false).build(),
+            password_label: gtk::Label::new(None),
+            message: gtk::Label::new(None),
+            submit: gtk::Button::new(),
+            cancel: gtk::Button::new(),
+            reboot: gtk::Button::new(),
+            shutdown: gtk::Button::new(),
+        };
+        let respond = |response| {
+            let step = form.login.borrow_mut().handle(response);
+            form.apply(step);
+        };
+        let prompt = |text: &str, secret| Response::AuthMessage {
+            auth_message_type: if secret {
+                AuthMessageType::Secret
+            } else {
+                AuthMessageType::Visible
+            },
+            auth_message: text.into(),
+        };
+        form.username.set_text("alice");
+        // GTK masks Unicode scalar values, not UTF-8 bytes or grapheme clusters.
+        let password = "é🔑e\u{301}";
+        form.password.set_text(password);
+        form.submit();
+        assert_eq!(form.password.text(), "••••");
+        assert!(!form.password.is_sensitive());
+        assert_eq!(form.message.text(), "Logging in…");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Work::Auth(Request::CreateSession { .. }))
+        ));
+        form.submit();
+        assert!(rx.try_recv().is_err());
+        respond(prompt("Password:", true));
+        assert!(
+            matches!(rx.try_recv(), Ok(Work::Auth(Request::PostAuthMessageResponse { response: Some(s) })) if s == password)
+        );
+        assert_eq!(form.password.text(), "••••");
+
+        respond(prompt("Verification code:", true));
+        assert!(form.password.text().is_empty());
+        assert!(!form.pending_mask.get());
+        assert!(form.password.is_sensitive());
+        form.password.set_text("123456");
+        form.submit();
+        assert_eq!(form.password.text(), "••••••");
+        assert!(
+            matches!(rx.try_recv(), Ok(Work::Auth(Request::PostAuthMessageResponse { response: Some(s) })) if s == "123456")
+        );
+
+        respond(prompt("Account:", false));
+        assert!(form.password.text().is_empty());
+        form.password.set_text("public-response");
+        form.submit();
+        assert!(form.password.text().is_empty());
+        assert!(
+            matches!(rx.try_recv(), Ok(Work::Auth(Request::PostAuthMessageResponse { response: Some(s) })) if s == "public-response")
+        );
+
+        respond(prompt("Password:", true));
+        form.submit();
+        assert!(form.password.text().is_empty());
+        assert!(
+            matches!(rx.try_recv(), Ok(Work::Auth(Request::PostAuthMessageResponse { response: Some(s) })) if s.is_empty())
+        );
+
+        respond(prompt("Password:", true));
+        form.password.set_text("another-secret");
+        form.submit();
+        rx.try_recv().unwrap();
+        respond(Response::AuthMessage {
+            auth_message_type: AuthMessageType::Info,
+            auth_message: "Notice".into(),
+        });
+        assert!(form.password.text().is_empty());
+        form.submit();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Work::Auth(Request::PostAuthMessageResponse {
+                response: None
+            }))
+        ));
+
+        respond(prompt("Password:", true));
+        form.password.set_text("bad-password");
+        form.submit();
+        rx.try_recv().unwrap();
+        respond(Response::Error {
+            error_type: ErrorType::AuthError,
+            description: "private".into(),
+        });
+        assert!(form.password.text().is_empty());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Work::Auth(Request::CancelSession))
+        ));
+        respond(Response::Success);
+        assert!(form.password.is_sensitive());
+        assert!(!form.pending_mask.get());
+
+        for ending in [
+            Step::Reset {
+                message: String::new(),
+            },
+            Step::Finished,
+            Step::Send(Request::CancelSession),
+            Step::Fatal,
+        ] {
+            form.reset("");
+            form.password.set_text("secret");
+            form.submit();
+            assert!(form.pending_mask.get());
+            form.apply(ending);
+            assert!(form.password.text().is_empty());
+            assert!(!form.pending_mask.get());
+        }
+    }
 }

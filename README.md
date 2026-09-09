@@ -13,6 +13,10 @@ nix build
 nix flake check
 ```
 
+Run the GTK authentication-state test in an isolated display with
+`nix shell nixpkgs#xvfb-run --command xvfb-run -a nix develop --command env GTK_THEME=Adwaita cargo test --locked -- --include-ignored`.
+`tests/preview.sh /path/to/nixy-greeter /tmp/preview-output` additionally checks rendering and pending-login IPC against a fake greetd; it requires Xvfb, xdotool, ImageMagick, Tesseract, and Python 3.
+
 The flake exposes `packages.x86_64-linux.default` (also `nixy-greeter`), a pinned development shell, and a package check that runs the Rust tests. `shell.nix` remains available for callers supplying their own `pkgs`. Cargo.lock and `cargoHash` in `package.nix` pin Rust dependencies; update the hash when dependency changes require it.
 
 Demo mode never connects to greetd or executes session/power commands. Any credentials simulate a successful login. It opens a regular window so it can be previewed without replacing your login manager. Production mode requests a fullscreen window.

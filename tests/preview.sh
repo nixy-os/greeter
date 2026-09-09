@@ -8,7 +8,8 @@ mkdir -p "$output"
 Xvfb -displayfd 3 -screen 0 1280x900x24 3>"$output/display" >"$output/xvfb.log" 2>&1 &
 server=$!
 client=
-trap 'test -z "$client" || kill "$client" 2>/dev/null || true; kill "$server" 2>/dev/null || true' EXIT
+peer=
+trap 'test -z "$client" || kill "$client" 2>/dev/null || true; test -z "$peer" || kill "$peer" 2>/dev/null || true; kill "$server" 2>/dev/null || true' EXIT
 for _ in $(seq 1 100); do
   test ! -s "$output/display" || break
   sleep 0.05
@@ -61,6 +62,62 @@ sleep 0.3
 import -window "$window" "$output/power-demo.png"
 tesseract "$output/power-demo.png" stdout 2>/dev/null | grep -qi 'no power action'
 if grep -Ei '(Gtk|GLib).*(CRITICAL|WARNING)|panic' "$output/client.log"; then
+  exit 1
+fi
+kill "$client"
+wait "$client" || true
+client=
+
+# Hold real IPC replies so the disabled entry can be inspected while pending.
+pending=$(mktemp -d "$output/pending.XXXXXX")
+python3 "$(dirname "$0")/pending-greetd.py" "$pending" >"$pending/server.log" 2>&1 &
+peer=$!
+wait_for() {
+  for _ in $(seq 1 200); do
+    if test -f "$pending/$1"; then return; fi
+    sleep 0.05
+  done
+  echo "Timed out waiting for $1" >&2
+  return 1
+}
+wait_for server-ready
+GREETD_SOCK="$pending/greetd.sock" "$binary" --session /unused-session --systemctl /unused-systemctl >"$pending/client.log" 2>&1 &
+client=$!
+window=$(timeout 15 xdotool search --sync --name 'Nixy login' | head -n 1)
+xdotool windowfocus --sync "$window"
+sleep 1
+xdotool type 'demo-user'
+xdotool key Return
+xdotool type 'demo-password'
+sleep 0.3
+import -window "$window" "$pending/before-submit.png"
+xdotool key Return
+wait_for create-received
+sleep 0.2
+import -window "$window" "$pending/pending-create.png"
+touch "$pending/release-create"
+wait_for password-received
+import -window "$window" "$pending/pending-password.png"
+for shot in pending-create pending-password; do
+  tesseract "$pending/$shot.png" stdout 2>/dev/null | grep -qi 'Logging in'
+  # Compare the dots themselves (excluding the caret and border), pixel for pixel.
+  magick "$pending/before-submit.png" -crop 123x18+389+424 +repage "$pending/expected.png"
+  magick "$pending/$shot.png" -crop 123x18+389+424 +repage "$pending/actual.png"
+  magick compare -metric AE "$pending/expected.png" "$pending/actual.png" null:
+done
+touch "$pending/release-password"
+wait_for cancel-received
+sleep 0.2
+import -window "$window" "$pending/failure-pending-cancel.png"
+test "$(magick "$pending/failure-pending-cancel.png" -crop 123x18+389+424 +repage -threshold 40% -format '%[fx:maxima]' info:)" = 0
+touch "$pending/release-cancel"
+wait_for server-passed
+wait "$peer"
+peer=
+sleep 0.2
+import -window "$window" "$pending/reset.png"
+tesseract "$pending/reset.png" stdout 2>/dev/null | grep -qi 'Login failed'
+if grep -Ei '(Gtk|GLib).*(CRITICAL|WARNING)|panic' "$pending/client.log"; then
   exit 1
 fi
 echo "Preview login passed; screenshots in $output"
